@@ -1,0 +1,71 @@
+---
+title: "Pan-NF Drug Screening Data - Target Quantification"
+author: "Robert Allaway"
+date: "2/4/2019"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(synapser)
+library(tidyverse)
+synLogin()
+data <- synGet("syn17100888", version = 11)$path %>% read.csv()
+
+targets <- synGet("syn17091507")$path %>% readRDS() %>% filter(mean_pchembl > 6)
+```
+
+## Public NF drug screening data. 
+
+Get all of the public NF drug screening data (syn17100888) and map in the drug targets (syn17091507) where pchembl > 6 (so that we are fairly confident these are bonafide targets).
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+data_targets <- data %>% 
+  left_join(targets, by =c("DT_explorer_internal_id" = "internal_id"))
+
+
+```
+
+First join the two datasets and then take a look at what targets appear to be very highly represented in these data: 
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+quant_targets <- data_targets %>% 
+  select(drug_screen_id, hugo_gene) %>% 
+  distinct() %>% 
+  filter(!is.na(hugo_gene)) %>% 
+  add_count(hugo_gene) %>% 
+  select(-drug_screen_id) %>% 
+  distinct()
+
+quant_targets$hugo_gene <- factor(quant_targets$hugo_gene, levels = quant_targets$hugo_gene[order(-quant_targets$n)])
+
+p <- ggplot(data = quant_targets %>% top_n(50, n)) +
+  geom_bar(aes(x = hugo_gene, y = n), stat = "identity")+  
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+p
+```
+
+Then, look at the top targets by max response across all cell lines (boxplots are made from is many individual target+max % response values).
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+quant_targets_2 <- data_targets %>% 
+  select(drug_screen_id, hugo_gene, response) %>% 
+  group_by(drug_screen_id, hugo_gene) %>% 
+  summarize(response = min(response)) %>% 
+  ungroup() %>% 
+  group_by(hugo_gene) %>% 
+  mutate(median = median(response)) %>% 
+  ungroup() %>% 
+  filter(!is.na(hugo_gene))
+
+p <- ggplot(data = quant_targets_2 %>% top_n(2000, -median)) +
+  geom_boxplot(aes(x = reorder(hugo_gene, median), y = response)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+p
+```
+
+The raw data are quite noisy, but these targets are the most effective in reducing the viability of the cells in this dataset. These could be broadly-toxic targets or very effective targets depending on which cell lines are represented in each set. 
