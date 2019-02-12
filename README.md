@@ -15,3 +15,5 @@ Create a pull request against [this repo](https://github.com/allaway/one_nf_anal
 We'll add you to the [Synapse project](https://www.synapse.org/#!Synapse:syn18143149/wiki/588476) as well. 
 
 Then, do some analysis using an R markdown, Jupyter notebook, or similar. When you're done, upload your analysis to this Synapse project, and put the code in the corresponding Github project. 
+
+Need some inspiration? Head over to the [NF Data Portal](nf.synapse.org) to explore NF studies, datasets, data files, and more! 
