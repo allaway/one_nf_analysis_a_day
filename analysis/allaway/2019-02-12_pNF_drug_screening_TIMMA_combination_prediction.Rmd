@@ -1,0 +1,67 @@
+---
+title: "2018-02-08 Pan-NF Drug Screening TIMMA Combination Prediction"
+author: "Robert Allaway"
+date: "2/8/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(timma)
+library(synapser)
+synLogin()
+
+targets <- synGet("syn17091507")$path %>% readRDS() %>% filter(mean_pchembl > 6)
+
+```
+##Prepare the drug-target dataset. 
+
+We've already done the hard work of mapping these two datasets together, so we just need to filter down to get a binary list of targets. We'll assume everything with a pChembl >6 is a "real" target.
+
+```{r}
+
+targets <- synGet("syn17091507")$path %>% readRDS() %>% 
+  filter(mean_pchembl > 6) %>% 
+  select(internal_id, hugo_gene, std_name) %>% 
+  distinct()
+
+```
+## Prepare the drug screening data. 
+
+This data is standardized across all public NF studies, and a variety of drug metrics were calculated each experiment. However, there is a _lot_ of diverse data here, so we should do a bit to clean up the data and narrow the scope, and eliminate metrics that might not be that accurate. 
+
+Specificially, we will: 
+-get the dataset 
+-filter for absolute IC50 values only, also known as GI50 (this different than the relative IC50, which is the half-maximal inhibition)
+-filter for one cell line model - this method can only work on set of drugs on a single model. Let's look at the NF1 deficient pNF cell line ipNF95.6.
+-filter out the combination data (too messy for a first pass of this method)
+-select only the columns we need ()
+-`inner_join` on the target dataset to filter out any drugs that we don't have target info for. 
+
+```{r}
+
+drug_data <- synGet("syn17462699")$path %>% read.csv() 
+
+drug_data_filt <- drug_data %>% 
+  filter(response_type == "IC50_abs") %>% 
+  filter(model_name == "ipNF95.6") %>% 
+  group_by(drug_screen_id) %>% 
+  filter(n() == 1) %>% 
+  ungroup() %>% 
+  select(DT_explorer_internal_id, drug_name, response) %>% 
+  inner_join(targets, by = c("DT_explorer_internal_id" = "internal_id"))
+  
+target_data_filt <- drug_data_filt %>% 
+  select(DT_explorer_internal_id, hugo_gene) %>% 
+  distinct() %>% 
+  add_column(foo = c(1)) %>% 
+  spread(DT_explorer_internal_id, foo, fill = 0)
+
+
+
+```
+
+
+```{r , echo=FALSE}
+
+```

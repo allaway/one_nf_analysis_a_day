@@ -1,0 +1,190 @@
+---
+title: "2018-02-12 pNF Drug Screening tSNE Target Clusters"
+author: "Robert Allaway"
+date: "2/12/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+library(tidyverse)
+library(synapser)
+synLogin()
+
+```
+##Prepare the drug-target dataset. 
+
+We've already done the hard work of mapping IDs in these two datasets together, so we just need to filter down to get a list of targets. We'll assume everything with a pChEMBL >6 is a "real" target.
+
+```{r message=FALSE, warning=FALSE}
+
+targets <- synGet("syn17091507")$path %>% readRDS() %>% 
+  filter(mean_pchembl > 6) %>% 
+  select(internal_id, hugo_gene, std_name) %>% 
+  distinct()
+
+```
+## Prepare the drug screening data. 
+
+This data is standardized across all public NF studies, and a variety of drug metrics were calculated each experiment. However, there is a _lot_ of diverse data here, so we should do a bit to clean up the data and narrow the scope, and eliminate metrics that might not be that accurate. 
+
+Specificially, we will: 
+
+-get the dataset 
+
+-filter for absolute IC50 values only, also known as GI50 (this different than the relative IC50, which is the half-maximal inhibition)
+
+-filter for NF1 deficient pNF cell lines
+
+-remove outlier cell line 'ipNF95.11b C'
+
+-filter out the combination data (too complicated for a first pass of this method)
+
+-calculate the median IC50 for each drug across all cell lines, when we have an IC50 for at least three cell lines for a given drug. 
+
+-select only the information we need
+
+-`inner_join` on the target dataset to filter out any drugs that we don't have target info for. 
+
+- binarize the target dataset after it has been reduced to only the drugs we can evaluate
+
+
+```{r message=FALSE, warning=FALSE}
+
+drug_data <- synGet("syn17462699")$path %>% read.csv() 
+
+pnf <- c("ipNF05.5", "ipNF06.2A", "ipNF95.11b C/T", "ipnNF95.11C", "ipNF95.6", "ipNF05.5 (mixed clone)", "ipNF95.11b C")
+
+drug_data_filt <- drug_data %>% 
+  filter(response_type == "IC50_rel") %>% 
+  filter(model_name %in% pnf) %>% 
+  group_by(drug_screen_id) %>% 
+  filter(n() == 1) %>% 
+  ungroup() %>%  
+  mutate(response = case_when(response < 50 ~ response,
+                              response >= 50 ~ 50))
+
+ggplot(data = drug_data_filt) +
+  geom_boxplot(aes(x = model_name, y = response))
+  
+drug_data_filt <- drug_data_filt %>% 
+  filter(model_name != "ipNF95.11b C") %>% 
+  group_by(DT_explorer_internal_id) %>% 
+  filter(n() > 3) %>% 
+  ungroup() %>% 
+  select(DT_explorer_internal_id, response) %>%
+  group_by(DT_explorer_internal_id) %>% 
+  summarize('median_response' = median(response))%>% 
+  ungroup() 
+
+
+target_data_filt <- drug_data_filt %>% 
+  inner_join(targets, by = c("DT_explorer_internal_id" = "internal_id")) %>% 
+  select(DT_explorer_internal_id, hugo_gene) %>% 
+  distinct() %>% 
+  add_column(foo = c(1)) %>% 
+  spread(hugo_gene, foo, fill = 0) %>% 
+  column_to_rownames("DT_explorer_internal_id") %>% 
+  as.matrix()
+```
+
+Then, we take the binarized target matrix (`target_data_filt`) and use t-SNE (`Rtsne`) to see if there are any clusters of drugs based on their binarized target information. We'll try this for a range of perplexities and pick the one that seems to contain the most stable clusters across multiple perplexities.
+```{r message=FALSE, warning=FALSE}
+library(Rtsne)
+
+perplexities <- c(5,10,30,50,70,100)
+
+for(i in perplexities){
+foo <- Rtsne(target_data_filt, check_duplicates = F, perplexity = i)
+
+foo2 <- foo$Y %>% 
+  as.data.frame() %>% 
+  add_column("DT_explorer_internal_id" = as.integer(rownames(target_data_filt))) %>% 
+  left_join(drug_data_filt) %>% 
+  left_join(distinct(select(targets, internal_id, std_name)), by = c("DT_explorer_internal_id" = "internal_id"))
+
+p<-ggplot(foo2) + 
+  geom_point(aes(x = V1, y = V2), alpha = 0.5) +
+  labs(x = "x", y = "y", title = paste0("perplexity : ", i))
+
+print(p)
+}
+```
+
+It looks like a perplexity of 30 captures several clusters stable across other perplexity values, so we'll use that for the remaining analysis. To read more about tSNE, check out [this post](https://distill.pub/2016/misread-tsne/).
+
+Now, we'll take the tSNE output, and map it back to the median IC50s to add another dimension of information to our plots. 
+
+```{r message=FALSE, warning=FALSE}
+
+foo <- Rtsne(target_data_filt, check_duplicates = F, perplexity = 30)
+
+foo2 <- foo$Y %>% as.data.frame() %>% add_column("DT_explorer_internal_id" = as.integer(rownames(target_data_filt))) %>% left_join(drug_data_filt) %>% left_join(distinct(select(targets, internal_id, std_name)), by = c("DT_explorer_internal_id" = "internal_id"))
+
+
+```
+
+This is what the plain plot looks like. Several clusters pop out that might indicate families of drugs with similar target profiles. 
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE}
+
+p <- ggplot(foo2) + 
+  geom_point(aes(x = V1, y = V2)) +
+  labs(x = "x", y = "y") 
+  
+print(p)
+
+```
+
+We'll add the response information - log(IC50) where darker points have a better response. Several drug clusters have lots of dark points. These might be interesting to evaluate further!
+
+```{r message=FALSE, warning=FALSE}
+ggplot(foo2) + 
+  geom_point(aes(x = V1, y = V2, color = log(median_response)), alpha = 0.5) +
+  scale_color_viridis_c(option = "C", name = expression(log(median~IC['50'])))
+
+```
+
+Let's add labels for compounds where the median IC50 is less than 0.05 uM (50 nM).
+
+```{r message=FALSE, warning=FALSE}
+ggplot(foo2) + geom_point(aes(x = V1, y = V2, color = log(median_response)), alpha = 0.5) + scale_color_viridis_c(option = "C")  + ggrepel::geom_label_repel(data = foo2 %>% filter(median_response < 0.05), aes(x = V1, y = V2, label = std_name), size = 2)
+```
+
+Unsurprisingly, mTOR inhibitors like Torin1 and AZD8055 pop out, and they are pretty close to each other. 
+
+```{r message=FALSE, warning=FALSE}
+mtor <- c("AZD8055", "Torin1")
+DT::datatable(targets %>% filter(std_name %in% mtor))
+```
+
+There's an interesting cluster containing dopamine inhibitors: risperidone, pramipexol, haloperidol:
+
+```{r message=FALSE, warning=FALSE}
+dop <- c("RISPERIDONE", "PRAMIPEXOLE", "HALOPERIDOL")
+
+DT::datatable(targets %>% filter(std_name %in% dop))
+```
+
+And another cluster containing alpha adrenergic antagonists and NISCH inhibitors. 
+
+```{r message=FALSE, warning=FALSE}
+adra <- c("YOHIMBINE", "Moxonidine", "OXYMETAZOLINE", "Vancomycin", "Tizanidine")
+DT::datatable(targets %>% filter(std_name %in% adra))
+```
+
+And some TDP1 inhibitors:
+
+```{r message=FALSE, warning=FALSE}
+tdp1 <- c("CHEMBL1560884", "Carisoprodol", "LEVODOPA")
+DT::datatable(targets %>% filter(std_name %in% tdp1))
+```
+
+When we loosen the threshold to median IC50 < 150 nM, we start to see more clusters pop out, but it's a bit of a mess. 
+
+```{r message=FALSE, warning=FALSE}
+ggplot(foo2) + geom_point(aes(x = V1, y = V2, color = log(median_response)), alpha = 0.5) + 
+  scale_color_viridis_c(option = "C")  + 
+  ggrepel::geom_label_repel(data = foo2 %>% filter(median_response < 0.15), aes(x = V1, y = V2, label = std_name), size = 2)
+```
+
