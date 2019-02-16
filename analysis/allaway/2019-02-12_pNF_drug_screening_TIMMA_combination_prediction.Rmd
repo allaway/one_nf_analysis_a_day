@@ -1,5 +1,5 @@
 ---
-title: "2018-02-08 Pan-NF Drug Screening TIMMA Combination Prediction"
+title: "2018-02-08 pNF Drug Screening TIMMA Combination Prediction"
 author: "Robert Allaway"
 date: "2/8/2019"
 output: html_document
@@ -11,8 +11,6 @@ library(timma)
 library(synapser)
 synLogin()
 
-targets <- synGet("syn17091507")$path %>% readRDS() %>% filter(mean_pchembl > 6)
-
 ```
 ##Prepare the drug-target dataset. 
 
@@ -21,7 +19,7 @@ We've already done the hard work of mapping these two datasets together, so we j
 ```{r}
 
 targets <- synGet("syn17091507")$path %>% readRDS() %>% 
-  filter(mean_pchembl > 6) %>% 
+  filter(mean_pchembl > 7) %>% 
   select(internal_id, hugo_gene, std_name) %>% 
   distinct()
 
@@ -33,35 +31,96 @@ This data is standardized across all public NF studies, and a variety of drug me
 Specificially, we will: 
 -get the dataset 
 -filter for absolute IC50 values only, also known as GI50 (this different than the relative IC50, which is the half-maximal inhibition)
--filter for one cell line model - this method can only work on set of drugs on a single model. Let's look at the NF1 deficient pNF cell line ipNF95.6.
--filter out the combination data (too messy for a first pass of this method)
--select only the columns we need ()
+-filter for NF1 deficient pNF cell lines
+-remove outlier cell line
+-filter out the combination data (too complicated for a first pass of this method)
+-calculate the median IC50 for each drug across all cell lines
+-select only the information we need
 -`inner_join` on the target dataset to filter out any drugs that we don't have target info for. 
+
 
 ```{r}
 
 drug_data <- synGet("syn17462699")$path %>% read.csv() 
 
+pnf <- c("ipNF05.5", "ipNF06.2A", "ipNF95.11b C/T", "ipnNF95.11C", "ipNF95.6", "ipNF05.5 (mixed clone)", "ipNF95.11b C")
+
 drug_data_filt <- drug_data %>% 
-  filter(response_type == "IC50_abs") %>% 
-  filter(model_name == "ipNF95.6") %>% 
+  filter(response_type == "IC50_rel") %>% 
+  filter(model_name %in% pnf) %>% 
   group_by(drug_screen_id) %>% 
   filter(n() == 1) %>% 
+  ungroup() %>%  
+  mutate(response = case_when(response < 50 ~ response,
+                              response >= 50 ~ 50))
+
+ggplot(data = drug_data_filt) +
+  geom_boxplot(aes(x = model_name, y = response))
+  
+drug_data_filt <- drug_data_filt %>% 
+  filter(model_name != "ipNF95.11b C") %>% 
+  group_by(DT_explorer_internal_id) %>% 
+  filter(n() > 3) %>% 
   ungroup() %>% 
-  select(DT_explorer_internal_id, drug_name, response) %>% 
+  select(DT_explorer_internal_id, response) %>%
+  group_by(DT_explorer_internal_id) %>% 
+  summarize('median_response' = median(response))%>% 
+  ungroup() %>% 
   inner_join(targets, by = c("DT_explorer_internal_id" = "internal_id"))
   
 target_data_filt <- drug_data_filt %>% 
   select(DT_explorer_internal_id, hugo_gene) %>% 
   distinct() %>% 
   add_column(foo = c(1)) %>% 
-  spread(DT_explorer_internal_id, foo, fill = 0)
+  spread(hugo_gene, foo, fill = 0) %>% 
+  column_to_rownames("DT_explorer_internal_id") %>% 
+  as.matrix()
 
-
+drug_data_filt_distinct <- drug_data_filt %>% 
+  select(DT_explorer_internal_id, median_response) %>% 
+  distinct() %>% 
+  mutate(scaled_response = BBmisc::normalize(median_response, method = "range", range = c(1,0), margin = 1L))
 
 ```
 
 
 ```{r , echo=FALSE}
-
+output <- timma(x = target_data_filt, y = drug_data_filt_distinct$scaled_response, sp = 1,
+max_k = 8, filtering = FALSE , class = 2, averaging = "one.sided",
+weighted = FALSE, verbosity = T)
 ```
+
+```{r}
+perplexities <- c(5,10,30,50,70,100)
+
+for(i in perplexities){
+foo <- Rtsne(target_data_filt, check_duplicates = F, perplexity = i)
+
+foo2 <- foo$Y %>% 
+  as.data.frame() %>% 
+  add_column("DT_explorer_internal_id" = as.integer(rownames(target_data_filt))) %>% 
+  left_join(drug_data_filt) %>% 
+  left_join(distinct(select(targets, internal_id, std_name)), by = c("DT_explorer_internal_id" = "internal_id"))
+
+p<-ggplot(foo2) + 
+  geom_point(aes(x = V1, y = V2), alpha = 0.5)
+
+print(p)
+}
+```
+
+```{r}
+
+foo <- Rtsne(target_data_filt, check_duplicates = F, perplexity = 30)
+
+foo2 <- foo$Y %>% as.data.frame() %>% add_column("DT_explorer_internal_id" = as.integer(rownames(target_data_filt))) %>% left_join(drug_data_filt) %>% left_join(distinct(select(targets, internal_id, std_name)), by = c("DT_explorer_internal_id" = "internal_id"))
+
+ggplot(foo2) + geom_point(aes(x = V1, y = V2)) + scale_color_viridis_c(option = "C")  
+
+ggplot(foo2) + geom_point(aes(x = V1, y = V2, color = log(median_response)), alpha = 0.5) + scale_color_viridis_c(option = "C")  
+
+ggplot(foo2) + geom_point(aes(x = V1, y = V2, color = log(median_response)), alpha = 0.5) + scale_color_viridis_c(option = "C")  + ggrepel::geom_label_repel(data = foo2 %>% filter(median_response < 0.05), aes(x = V1, y = V2, label = std_name), size = 2)
+
+ggplot(foo2) + geom_point(aes(x = V1, y = V2, color = log(median_response)), alpha = 0.5) + scale_color_viridis_c(option = "C")  + ggrepel::geom_label_repel(data = foo2 %>% filter(median_response < 0.15), aes(x = V1, y = V2, label = std_name), size = 2)
+```
+
